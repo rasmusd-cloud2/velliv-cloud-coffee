@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
@@ -17,15 +18,8 @@ export interface SimulatorConstructProps {
   readonly apiEndpoint: string;
 }
 
-/**
- * Traffic simulator:
- *   - Runs every 1 minute via events.Rule + Schedule.rate
- *   - Each invocation: auth as bot -> 100-150 parallelized POSTs -> mixed chaos
- *   - Mix: 70% valid / 10% schema-invalid / 10% FATAL_ERROR / 5% SLOW_BREW / 5% POISON_PILL
- *   - POISON_PILL drives OrderProcessor chaos -> DLQ -> alarm (org demo)
- */
 export class SimulatorConstruct extends Construct {
-  public readonly simulator: lambda.Function;
+  public readonly simulator: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: SimulatorConstructProps) {
     super(scope, id);
@@ -38,13 +32,18 @@ export class SimulatorConstruct extends Construct {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    this.simulator = new lambda.Function(this, 'TrafficSimulator', {
+    this.simulator = new lambdaNodejs.NodejsFunction(this, 'TrafficSimulator', {
       functionName: `${stackName}-TrafficSimulator`,
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, '..', '..', 'src', 'traffic-simulator'),
+      entry: path.join(
+        __dirname,
+        '..',
+        '..',
+        'src',
+        'traffic-simulator',
+        'index.ts',
       ),
+      handler: 'handler',
       logGroup: simLogs,
       timeout: cdk.Duration.seconds(55),
       memorySize: 512,
@@ -54,6 +53,18 @@ export class SimulatorConstruct extends Construct {
         CLIENT_ID: props.userPoolClient.userPoolClientId,
         BOT_SECRET_ARN: props.botPasswordSecret.secretArn,
         BOT_USERNAME: props.botUsername,
+        NODE_OPTIONS: '--enable-source-maps',
+      },
+      bundling: {
+        format: lambdaNodejs.OutputFormat.ESM,
+        target: 'node20',
+        mainFields: ['module', 'main'],
+        // Simulator does not use the shared-utils layer; no externals needed
+        // beyond the runtime-provided AWS SDK v3.
+        externalModules: ['@aws-sdk/*'],
+        sourceMap: true,
+        banner:
+          "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
       },
     });
 
@@ -65,7 +76,6 @@ export class SimulatorConstruct extends Construct {
       }),
     );
 
-    // 1-min schedule via events.Rule (stable L2, NOT alpha aws-scheduler)
     new events.Rule(this, 'SimulatorSchedule', {
       ruleName: 'CloudKaffeTrafficSimulatorSchedule',
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),

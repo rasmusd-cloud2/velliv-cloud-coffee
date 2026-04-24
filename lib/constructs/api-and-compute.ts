@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
@@ -21,21 +22,17 @@ export interface ApiAndComputeConstructProps {
 }
 
 /**
- * Compute + API plane:
- *   - SharedUtilsLayer (ESM layer via /opt/nodejs/node_modules/shared-utils)
- *   - OrderReceiver Lambda (X-Ray, EMF via stdout, chaos: FATAL_ERROR + SLOW_BREW)
- *   - OrderProcessor Lambda (chaos: POISON_PILL -> DLQ; DDB update + S3 put + presigned URL)
- *   - REST API /orders POST (Cognito authorizer + schema validation + X-Ray + CORS)
- *   - Composite alarm (5XX rate > 5% AND request count >= 10)
+ * Compute + API plane.
  *
- * Explicit log groups per Lambda with RemovalPolicy.DESTROY so cdk destroy
- * leaves zero orphaned log groups. Do NOT use Lambda Function.logRetention
- * prop - it orphans log groups on destroy.
+ * Lambdas use NodejsFunction (esbuild) so TypeScript source + @aws-sdk/*
+ * deps (including s3-request-presigner not in Lambda managed runtime) get
+ * bundled automatically. `shared-utils` is marked external so it resolves
+ * at runtime from the /opt/nodejs layer via NODE_PATH.
  */
 export class ApiAndComputeConstruct extends Construct {
   public readonly api: apigw.RestApi;
-  public readonly orderReceiver: lambda.Function;
-  public readonly orderProcessor: lambda.Function;
+  public readonly orderReceiver: lambdaNodejs.NodejsFunction;
+  public readonly orderProcessor: lambdaNodejs.NodejsFunction;
   public readonly sharedLayer: lambda.LayerVersion;
 
   public get apiEndpoint(): string {
@@ -51,75 +48,119 @@ export class ApiAndComputeConstruct extends Construct {
 
     const stackName = cdk.Stack.of(this).stackName;
 
-    // ---- Shared Lambda layer (ESM) ----
+    // Shared ESM layer - stays as .mjs at /opt/nodejs/node_modules/shared-utils
     this.sharedLayer = new lambda.LayerVersion(this, 'SharedUtilsLayer', {
       layerVersionName: 'CloudKaffeSharedUtils',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', '..', 'src', 'shared-layer'),
       ),
       compatibleRuntimes: [lambda.Runtime.NODEJS_20_X],
-      description:
-        'Shared ESM utilities for CloudKaffe Lambdas (formatTimestamp, etc.)',
+      description: 'Shared ESM utilities for CloudKaffe Lambdas',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // ---- OrderReceiver Lambda ----
+    // Common bundling config: ESM output, AWS SDK external (in runtime),
+    // shared-utils external (resolved from layer via NODE_PATH).
+    const commonBundling: lambdaNodejs.BundlingOptions = {
+      format: lambdaNodejs.OutputFormat.ESM,
+      target: 'node20',
+      mainFields: ['module', 'main'],
+      externalModules: ['@aws-sdk/*', 'shared-utils'],
+      sourceMap: true,
+      // ESM banner: required for `require`/`__dirname` shims when esbuild
+      // emits ESM but a bundled dep still uses CommonJS idioms.
+      banner:
+        "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
+    };
+
+    // OrderReceiver
     const receiverLogs = new logs.LogGroup(this, 'OrderReceiverLogGroup', {
       logGroupName: `/aws/lambda/${stackName}-OrderReceiver`,
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-    this.orderReceiver = new lambda.Function(this, 'OrderReceiver', {
-      functionName: `${stackName}-OrderReceiver`,
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, '..', '..', 'src', 'order-receiver'),
-      ),
-      tracing: lambda.Tracing.ACTIVE,
-      layers: [this.sharedLayer],
-      logGroup: receiverLogs,
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 256,
-      environment: {
-        ORDERS_TABLE: props.ordersTable.tableName,
-        EVENT_BUS_NAME: props.eventBus.eventBusName,
-        POWERTOOLS_METRICS_NAMESPACE: 'CloudKaffe',
+    this.orderReceiver = new lambdaNodejs.NodejsFunction(
+      this,
+      'OrderReceiver',
+      {
+        functionName: `${stackName}-OrderReceiver`,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        entry: path.join(
+          __dirname,
+          '..',
+          '..',
+          'src',
+          'order-receiver',
+          'index.ts',
+        ),
+        handler: 'handler',
+        tracing: lambda.Tracing.ACTIVE,
+        layers: [this.sharedLayer],
+        logGroup: receiverLogs,
+        timeout: cdk.Duration.seconds(10),
+        memorySize: 256,
+        environment: {
+          ORDERS_TABLE: props.ordersTable.tableName,
+          EVENT_BUS_NAME: props.eventBus.eventBusName,
+          POWERTOOLS_METRICS_NAMESPACE: 'CloudKaffe',
+          NODE_OPTIONS: '--enable-source-maps',
+        },
+        bundling: commonBundling,
       },
-    });
+    );
     props.ordersTable.grantWriteData(this.orderReceiver);
     props.eventBus.grantPutEventsTo(this.orderReceiver);
 
-    // ---- OrderProcessor Lambda ----
+    // OrderProcessor (bundles s3-request-presigner, not in managed runtime)
     const processorLogs = new logs.LogGroup(this, 'OrderProcessorLogGroup', {
       logGroupName: `/aws/lambda/${stackName}-OrderProcessor`,
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-    this.orderProcessor = new lambda.Function(this, 'OrderProcessor', {
-      functionName: `${stackName}-OrderProcessor`,
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, '..', '..', 'src', 'order-processor'),
-      ),
-      tracing: lambda.Tracing.ACTIVE,
-      layers: [this.sharedLayer],
-      logGroup: processorLogs,
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
-      environment: {
-        ORDERS_TABLE: props.ordersTable.tableName,
-        RECEIPTS_BUCKET: props.receiptsBucket.bucketName,
+    this.orderProcessor = new lambdaNodejs.NodejsFunction(
+      this,
+      'OrderProcessor',
+      {
+        functionName: `${stackName}-OrderProcessor`,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        entry: path.join(
+          __dirname,
+          '..',
+          '..',
+          'src',
+          'order-processor',
+          'index.ts',
+        ),
+        handler: 'handler',
+        tracing: lambda.Tracing.ACTIVE,
+        layers: [this.sharedLayer],
+        logGroup: processorLogs,
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 256,
+        environment: {
+          ORDERS_TABLE: props.ordersTable.tableName,
+          RECEIPTS_BUCKET: props.receiptsBucket.bucketName,
+          NODE_OPTIONS: '--enable-source-maps',
+        },
+        bundling: {
+          ...commonBundling,
+          // Only externalize the AWS SDK client-* packages (in managed
+          // runtime). `@aws-sdk/s3-request-presigner` is NOT in the runtime
+          // and MUST be bundled - this narrower pattern lets esbuild bundle it.
+          externalModules: ['@aws-sdk/client-*', 'shared-utils'],
+        },
       },
-    });
+    );
     this.orderProcessor.addEventSource(
-      new SqsEventSource(props.orderQueue, { batchSize: 1, reportBatchItemFailures: true }),
+      new SqsEventSource(props.orderQueue, {
+        batchSize: 1,
+        reportBatchItemFailures: true,
+      }),
     );
     props.ordersTable.grantWriteData(this.orderProcessor);
     props.receiptsBucket.grantReadWrite(this.orderProcessor);
 
-    // ---- REST API with Cognito authorizer + request validator ----
+    // REST API with Cognito authorizer + request validator
     this.api = new apigw.RestApi(this, 'OrdersApi', {
       restApiName: 'CloudKaffeOrdersApi',
       description: 'Cloud Kaffen order intake API',
@@ -178,7 +219,7 @@ export class ApiAndComputeConstruct extends Construct {
       },
     );
 
-    // ---- Composite alarm: 5XX rate > 5% AND request count >= 10 ----
+    // Composite alarm: 5XX rate > 5% AND request count >= 10
     const m5xx = new cloudwatch.Metric({
       namespace: 'AWS/ApiGateway',
       metricName: '5XXError',

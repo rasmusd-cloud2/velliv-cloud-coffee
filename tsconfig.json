@@ -19,7 +19,12 @@
     "strictPropertyInitialization": false,
     "resolveJsonModule": true,
     "esModuleInterop": true,
-    "typeRoots": ["./node_modules/@types"]
+    "typeRoots": ["./node_modules/@types"],
+    "baseUrl": ".",
+    "paths": {
+      "shared-utils": ["src/shared-layer/nodejs/node_modules/shared-utils"]
+    },
+    "allowJs": true
   },
-  "exclude": ["node_modules", "cdk.out", "src/**/*.mjs", "src/**/node_modules"]
+  "exclude": ["node_modules", "cdk.out", "src/shared-layer/nodejs/node_modules"]
 }

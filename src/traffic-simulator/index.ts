@@ -1,14 +1,10 @@
 /**
- * Traffic Simulator Lambda
+ * Traffic Simulator Lambda (TypeScript, bundled by NodejsFunction/esbuild).
  *
- * Runs every 1 minute. Each invocation:
- *   1. Fetches bot password from Secrets Manager
- *   2. AdminInitiateAuth (USER_PASSWORD_AUTH flow) -> IdToken
- *   3. Builds 100-150 request descriptors with the chaos mix:
- *        70% valid / 10% schema-invalid / 10% FATAL_ERROR / 5% SLOW_BREW / 5% POISON_PILL
- *   4. Parallelizes HTTP POSTs in batches of 10 via Promise.allSettled
- *      (failures in one request do not drop visibility into the rest)
- *   5. Logs summary counts
+ * Every 1 minute: auth as bot -> build 100-150 request descriptors with
+ * chaos mix -> POST in parallelized batches of 10 via Promise.allSettled.
+ *
+ * Mix: 70% valid / 10% schemaInvalid / 10% FATAL_ERROR / 5% SLOW_BREW / 5% POISON_PILL
  */
 
 import {
@@ -23,14 +19,25 @@ import {
 const secrets = new SecretsManagerClient({});
 const cognito = new CognitoIdentityProviderClient({});
 
-const API_ENDPOINT = process.env.API_ENDPOINT;
-const USER_POOL_ID = process.env.USER_POOL_ID;
-const CLIENT_ID = process.env.CLIENT_ID;
-const BOT_SECRET_ARN = process.env.BOT_SECRET_ARN;
+const API_ENDPOINT = process.env.API_ENDPOINT!;
+const USER_POOL_ID = process.env.USER_POOL_ID!;
+const CLIENT_ID = process.env.CLIENT_ID!;
+const BOT_SECRET_ARN = process.env.BOT_SECRET_ARN!;
 const BOT_USERNAME = process.env.BOT_USERNAME ?? 'bot';
 
-// Chaos mix percentages (sum = 100)
-const MIX = [
+type Kind =
+  | 'valid'
+  | 'schemaInvalid'
+  | 'fatalError'
+  | 'slowBrew'
+  | 'poisonPill';
+
+interface MixEntry {
+  key: Kind;
+  pct: number;
+}
+
+const MIX: readonly MixEntry[] = [
   { key: 'valid', pct: 70 },
   { key: 'schemaInvalid', pct: 10 },
   { key: 'fatalError', pct: 10 },
@@ -38,7 +45,12 @@ const MIX = [
   { key: 'poisonPill', pct: 5 },
 ];
 
-function pickKind() {
+interface OrderBody {
+  coffeeType?: string;
+  size: string;
+}
+
+function pickKind(): Kind {
   const r = Math.random() * 100;
   let acc = 0;
   for (const m of MIX) {
@@ -48,40 +60,38 @@ function pickKind() {
   return 'valid';
 }
 
-function buildBody(kind) {
+function buildBody(kind: Kind): OrderBody {
   switch (kind) {
     case 'valid':
       return { coffeeType: 'Latte', size: 'Large' };
     case 'schemaInvalid':
-      return { size: 'Large' }; // missing coffeeType - API GW returns 400
+      return { size: 'Large' };
     case 'fatalError':
       return { coffeeType: 'FATAL_ERROR', size: 'Large' };
     case 'slowBrew':
       return { coffeeType: 'SLOW_BREW', size: 'Large' };
     case 'poisonPill':
       return { coffeeType: 'POISON_PILL', size: 'Large' };
-    default:
-      return { coffeeType: 'Latte', size: 'Large' };
   }
 }
 
-async function getBotPassword() {
+async function getBotPassword(): Promise<string> {
   const res = await secrets.send(
     new GetSecretValueCommand({ SecretId: BOT_SECRET_ARN }),
   );
+  if (!res.SecretString) {
+    throw new Error('Bot secret has no SecretString');
+  }
   return res.SecretString;
 }
 
-async function getIdToken(password) {
+async function getIdToken(password: string): Promise<string> {
   const res = await cognito.send(
     new AdminInitiateAuthCommand({
       UserPoolId: USER_POOL_ID,
       ClientId: CLIENT_ID,
       AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
-      AuthParameters: {
-        USERNAME: BOT_USERNAME,
-        PASSWORD: password,
-      },
+      AuthParameters: { USERNAME: BOT_USERNAME, PASSWORD: password },
     }),
   );
   const token = res.AuthenticationResult?.IdToken;
@@ -91,7 +101,10 @@ async function getIdToken(password) {
   return token;
 }
 
-async function postOrder(token, body) {
+async function postOrder(
+  token: string,
+  body: OrderBody,
+): Promise<{ status: number; kind: string }> {
   const res = await fetch(`${API_ENDPOINT}orders`, {
     method: 'POST',
     headers: {
@@ -103,9 +116,12 @@ async function postOrder(token, body) {
   return { status: res.status, kind: body.coffeeType ?? 'missing' };
 }
 
-export const handler = async () => {
+export const handler = async (): Promise<{
+  total: number;
+  counts: Record<string, number>;
+}> => {
   const authStart = Date.now();
-  let token;
+  let token: string;
   try {
     const pw = await getBotPassword();
     token = await getIdToken(pw);
@@ -116,18 +132,27 @@ export const handler = async () => {
       }),
     );
   } catch (err) {
-    console.error(JSON.stringify({ event: 'auth_fail', error: err.message }));
+    const error = err as Error;
+    console.error(
+      JSON.stringify({ event: 'auth_fail', error: error.message }),
+    );
     throw err;
   }
 
-  // 100-150 requests per invocation
   const total = 100 + Math.floor(Math.random() * 51);
-  const descriptors = Array.from({ length: total }, () => buildBody(pickKind()));
+  const descriptors = Array.from({ length: total }, () =>
+    buildBody(pickKind()),
+  );
 
-  const counts = { valid: 0, schemaInvalid: 0, fatalError: 0, slowBrew: 0, poisonPill: 0 };
-  const statuses = new Map();
+  const counts = {
+    valid: 0,
+    schemaInvalid: 0,
+    fatalError: 0,
+    slowBrew: 0,
+    poisonPill: 0,
+  };
+  const statuses = new Map<number, number>();
 
-  // Parallelize in batches of 10 via Promise.allSettled
   const BATCH = 10;
   for (let i = 0; i < descriptors.length; i += BATCH) {
     const batch = descriptors.slice(i, i + BATCH);

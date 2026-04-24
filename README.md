@@ -107,7 +107,7 @@ Cross-referenced with `docs/workshop-agenda.md`.
 - SQS console → `CloudKaffeOrderProcessor` → Visibility Timeout, DLQ redrive
 - EventBridge console → Buses → `CloudKaffeBus` → Rules → `OrderCreatedToProcessor`
 - Event Archive → `CloudKaffeArchive` → Replay. Receipt keys are **deterministic** (`receipts/${orderId}.json`) so replay reprocesses in place — no duplicate files.
-- OrderProcessor logs show `s3Uri` + `presignHint` per order; run the printed `aws s3 presign` command to open the receipt.
+- OrderProcessor logs show `presignedUrl` per order — click the URL in CloudWatch Logs to open the receipt JSON in the browser (valid 1 hour).
 
 ## Destroy
 
@@ -153,7 +153,6 @@ These are flagged in the design doc. Not shipped here, good candidates for follo
 - Unit + snapshot tests via `aws-cdk-lib/assertions`
 - Multi-stack split (auth/data/compute/sim)
 - DDB Streams → Pipes outbox pattern (fixes split-brain write path between DDB and EventBridge)
-- Switch OrderProcessor to `NodejsFunction` so `@aws-sdk/s3-request-presigner` bundles cleanly (currently stubbed with `s3Uri` + presign CLI hint)
 
 ## Known gaps (workshop context)
 
