@@ -4,6 +4,7 @@ import { AuthConstruct } from './constructs/auth';
 import { DatabaseAndEventsConstruct } from './constructs/database-and-events';
 import { ApiAndComputeConstruct } from './constructs/api-and-compute';
 import { SimulatorConstruct } from './constructs/simulator';
+import { DashboardConstruct } from './constructs/dashboard';
 
 export interface CloudKaffeStackProps extends cdk.StackProps {
   readonly domainPrefix?: string;
@@ -39,12 +40,26 @@ export class CloudKaffeStack extends cdk.Stack {
       receiptsBucket: dataAndEvents.receiptsBucket,
     });
 
-    new SimulatorConstruct(this, 'Simulator', {
+    const sim = new SimulatorConstruct(this, 'Simulator', {
       userPool: auth.userPool,
       userPoolClient: auth.userPoolClient,
       botUsername: auth.botUsername,
       botPasswordSecret: auth.botPasswordSecret,
       apiEndpoint: apiAndCompute.apiEndpoint,
+    });
+
+    const dashboard = new DashboardConstruct(this, 'Dashboard', {
+      api: apiAndCompute.api,
+      orderReceiver: apiAndCompute.orderReceiver,
+      orderProcessor: apiAndCompute.orderProcessor,
+      simulator: sim.simulator,
+      ordersTable: dataAndEvents.ordersTable,
+      orderQueue: dataAndEvents.orderQueue,
+      orderDlq: dataAndEvents.orderDlq,
+      eventBus: dataAndEvents.eventBus,
+      orderCreatedRule: dataAndEvents.orderCreatedRule,
+      errorSpikeAlarm: apiAndCompute.errorSpikeAlarm,
+      dlqAlarm: dataAndEvents.dlqAlarm,
     });
 
     // Outputs for workshop attendees
@@ -59,6 +74,10 @@ export class CloudKaffeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DemoUserCredentials', {
       value: `demoUser / ${props.demoPassword}`,
       description: 'Workshop demo user (Module 4)',
+    });
+    new cdk.CfnOutput(this, 'DashboardUrl', {
+      value: dashboard.dashboardUrl,
+      description: 'CloudWatch workshop dashboard',
     });
   }
 }

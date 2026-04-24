@@ -31,6 +31,8 @@ export class DatabaseAndEventsConstruct extends Construct {
   public readonly orderQueue: sqs.Queue;
   public readonly orderDlq: sqs.Queue;
   public readonly alertsTopic: sns.Topic;
+  public readonly dlqAlarm: cloudwatch.Alarm;
+  public readonly orderCreatedRule: events.Rule;
 
   constructor(
     scope: Construct,
@@ -87,7 +89,7 @@ export class DatabaseAndEventsConstruct extends Construct {
     });
 
     // ---- EventBridge rule: OrderCreated -> SQS ----
-    new events.Rule(this, 'OrderCreatedRule', {
+    this.orderCreatedRule = new events.Rule(this, 'OrderCreatedRule', {
       eventBus: this.eventBus,
       ruleName: 'OrderCreatedToProcessor',
       eventPattern: { detailType: ['OrderCreated'] },
@@ -106,7 +108,7 @@ export class DatabaseAndEventsConstruct extends Construct {
     }
 
     // ---- DLQ depth alarm ----
-    const dlqAlarm = new cloudwatch.Alarm(this, 'DLQDepthAlarm', {
+    this.dlqAlarm = new cloudwatch.Alarm(this, 'DLQDepthAlarm', {
       alarmName: 'CloudKaffe-DLQ-NotEmpty',
       alarmDescription:
         'DLQ has >=1 message - order processor failed 3 retries (POISON_PILL chaos or real failure)',
@@ -120,6 +122,6 @@ export class DatabaseAndEventsConstruct extends Construct {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    dlqAlarm.addAlarmAction(new cwactions.SnsAction(this.alertsTopic));
+    this.dlqAlarm.addAlarmAction(new cwactions.SnsAction(this.alertsTopic));
   }
 }
