@@ -1,0 +1,75 @@
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as path from 'path';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+
+export interface SimulatorConstructProps {
+  readonly userPool: cognito.UserPool;
+  readonly userPoolClient: cognito.UserPoolClient;
+  readonly botUsername: string;
+  readonly botPasswordSecret: secretsmanager.Secret;
+  readonly apiEndpoint: string;
+}
+
+/**
+ * Traffic simulator:
+ *   - Runs every 1 minute via events.Rule + Schedule.rate
+ *   - Each invocation: auth as bot -> 100-150 parallelized POSTs -> mixed chaos
+ *   - Mix: 70% valid / 10% schema-invalid / 10% FATAL_ERROR / 5% SLOW_BREW / 5% POISON_PILL
+ *   - POISON_PILL drives OrderProcessor chaos -> DLQ -> alarm (org demo)
+ */
+export class SimulatorConstruct extends Construct {
+  public readonly simulator: lambda.Function;
+
+  constructor(scope: Construct, id: string, props: SimulatorConstructProps) {
+    super(scope, id);
+
+    const stackName = cdk.Stack.of(this).stackName;
+
+    const simLogs = new logs.LogGroup(this, 'SimulatorLogGroup', {
+      logGroupName: `/aws/lambda/${stackName}-TrafficSimulator`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    this.simulator = new lambda.Function(this, 'TrafficSimulator', {
+      functionName: `${stackName}-TrafficSimulator`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', '..', 'src', 'traffic-simulator'),
+      ),
+      logGroup: simLogs,
+      timeout: cdk.Duration.seconds(55),
+      memorySize: 512,
+      environment: {
+        API_ENDPOINT: props.apiEndpoint,
+        USER_POOL_ID: props.userPool.userPoolId,
+        CLIENT_ID: props.userPoolClient.userPoolClientId,
+        BOT_SECRET_ARN: props.botPasswordSecret.secretArn,
+        BOT_USERNAME: props.botUsername,
+      },
+    });
+
+    props.botPasswordSecret.grantRead(this.simulator);
+    this.simulator.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminInitiateAuth'],
+        resources: [props.userPool.userPoolArn],
+      }),
+    );
+
+    // 1-min schedule via events.Rule (stable L2, NOT alpha aws-scheduler)
+    new events.Rule(this, 'SimulatorSchedule', {
+      ruleName: 'CloudKaffeTrafficSimulatorSchedule',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      targets: [new eventsTargets.LambdaFunction(this.simulator)],
+    });
+  }
+}

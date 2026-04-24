@@ -1,0 +1,32 @@
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Un-ignore the shared-layer node_modules (it's source code, not installed deps)
+!src/shared-layer/nodejs/node_modules/
+!src/shared-layer/nodejs/node_modules/shared-utils/
+!src/shared-layer/nodejs/node_modules/shared-utils/*
