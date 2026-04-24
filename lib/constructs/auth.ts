@@ -124,9 +124,38 @@ export class AuthConstruct extends Construct {
       messageAction: 'SUPPRESS',
     });
 
-    // Narrow custom resource: only to set the bot's password as permanent
-    // (Cognito requires adminSetUserPassword for USER_PASSWORD_AUTH flow).
-    // Reads the Secret value at deploy time via SDK call.
+    // Step 1: read the generated secret value via SDK. Must use a
+    // chained custom resource because {{resolve:secretsmanager:...}} is
+    // NOT resolved inside arbitrary custom-resource parameters — only
+    // inside a short allowlist (RDS master password, etc). Putting it
+    // directly on adminSetUserPassword.Password sets the LITERAL token
+    // string as the password.
+    const getBotSecret = new AwsCustomResource(this, 'GetBotSecret', {
+      resourceType: 'Custom::GetBotSecret',
+      onCreate: {
+        service: 'SecretsManager',
+        action: 'getSecretValue',
+        parameters: { SecretId: this.botPasswordSecret.secretArn },
+        physicalResourceId: PhysicalResourceId.of(
+          `${cdk.Stack.of(this).stackName}-GetBotSecret`,
+        ),
+      },
+      onUpdate: {
+        service: 'SecretsManager',
+        action: 'getSecretValue',
+        parameters: { SecretId: this.botPasswordSecret.secretArn },
+        physicalResourceId: PhysicalResourceId.of(
+          `${cdk.Stack.of(this).stackName}-GetBotSecret`,
+        ),
+      },
+      policy: AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [this.botPasswordSecret.secretArn],
+      }),
+    });
+
+    // Step 2: set the bot's password = SecretString from step 1.
+    // getResponseField emits a Fn::GetAtt reference — CFN resolves it
+    // to the plaintext before invoking the custom-resource Lambda.
     const setBotPassword = new AwsCustomResource(this, 'SetBotPassword', {
       resourceType: 'Custom::SetBotPassword',
       onCreate: {
@@ -135,8 +164,7 @@ export class AuthConstruct extends Construct {
         parameters: {
           UserPoolId: this.userPool.userPoolId,
           Username: this.botUsername,
-          Password: this.botPasswordSecret
-            .secretValue.unsafeUnwrap(),
+          Password: getBotSecret.getResponseField('SecretString'),
           Permanent: true,
         },
         physicalResourceId: PhysicalResourceId.of(
@@ -149,20 +177,19 @@ export class AuthConstruct extends Construct {
         parameters: {
           UserPoolId: this.userPool.userPoolId,
           Username: this.botUsername,
-          Password: this.botPasswordSecret
-            .secretValue.unsafeUnwrap(),
+          Password: getBotSecret.getResponseField('SecretString'),
           Permanent: true,
         },
         physicalResourceId: PhysicalResourceId.of(
           `${cdk.Stack.of(this).stackName}-SetBotPassword`,
         ),
       },
-      // No onDelete - L1 user cascade-delete handles it
       policy: AwsCustomResourcePolicy.fromSdkCalls({
         resources: [this.userPool.userPoolArn],
       }),
     });
     setBotPassword.node.addDependency(botUser);
+    setBotPassword.node.addDependency(getBotSecret);
 
     // -----------------------------------------------------------------
     // Demo user (Module 4 - attendees log in via Hosted UI)
