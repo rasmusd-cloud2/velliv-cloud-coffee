@@ -11,6 +11,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 
 export interface ApiAndComputeConstructProps {
@@ -34,6 +35,7 @@ export class ApiAndComputeConstruct extends Construct {
   public readonly orderReceiver: lambdaNodejs.NodejsFunction;
   public readonly orderProcessor: lambdaNodejs.NodejsFunction;
   public readonly sharedLayer: lambda.LayerVersion;
+  public readonly errorSpikeAlarm: cloudwatch.CompositeAlarm;
 
   public get apiEndpoint(): string {
     return this.api.url;
@@ -160,6 +162,21 @@ export class ApiAndComputeConstruct extends Construct {
     props.ordersTable.grantWriteData(this.orderProcessor);
     props.receiptsBucket.grantReadWrite(this.orderProcessor);
 
+    // Account-level CloudWatch Logs role for API Gateway. Required when
+    // stage has dataTraceEnabled/loggingLevel set. First-time API GW use
+    // in an account fails without this.
+    const apiGwCloudWatchRole = new iam.Role(this, 'ApiGwCloudWatchRole', {
+      assumedBy: new iam.ServicePrincipal('apigateway.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AmazonAPIGatewayPushToCloudWatchLogs',
+        ),
+      ],
+    });
+    const apiGwAccount = new apigw.CfnAccount(this, 'ApiGwAccount', {
+      cloudWatchRoleArn: apiGwCloudWatchRole.roleArn,
+    });
+
     // REST API with Cognito authorizer + request validator
     this.api = new apigw.RestApi(this, 'OrdersApi', {
       restApiName: 'CloudKaffeOrdersApi',
@@ -177,6 +194,7 @@ export class ApiAndComputeConstruct extends Construct {
         allowHeaders: ['Content-Type', 'Authorization'],
       },
     });
+    this.api.node.addDependency(apiGwAccount);
 
     const authorizer = new apigw.CognitoUserPoolsAuthorizer(
       this,
@@ -257,7 +275,7 @@ export class ApiAndComputeConstruct extends Construct {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    new cloudwatch.CompositeAlarm(this, 'ApiErrorSpikeComposite', {
+    this.errorSpikeAlarm = new cloudwatch.CompositeAlarm(this, 'ApiErrorSpikeComposite', {
       compositeAlarmName: 'CloudKaffe-API-ErrorSpike',
       alarmDescription:
         'Fires when API GW 5XX rate > 5% AND request count >= 10 in 1 min',
