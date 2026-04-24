@@ -7,10 +7,9 @@ See `docs/workshop-agenda.md` for the workshop agenda (Danish), `docs/infrastruc
 ## Prereqs
 
 - Node 20+
-- AWS CLI v2 configured (`aws configure` or `AWS_PROFILE`)
+- AWS CLI v2 installed
 - AWS CDK CLI v2 (`npm install -g aws-cdk`)
 - Admin IAM role on the target AWS account (no SCPs blocking Cognito domain creation, EventBridge archive, IAM role creation, etc.)
-- Bootstrapped AWS account: `cdk bootstrap aws://<ACCOUNT>/<REGION>`
 
 ## Setup
 
@@ -20,14 +19,43 @@ cd velliv-cloud-coffee
 npm install
 ```
 
+## Configure AWS credentials (SSO, default profile)
+
+One-time setup of the `default` profile against your SSO start URL:
+
+```bash
+aws configure sso
+# SSO session name (Recommended): cloud-kaffe
+# SSO start URL: https://<your-org>.awsapps.com/start
+# SSO region: eu-central-1
+# SSO registration scopes: sso:account:access
+# (browser opens, approve)
+# CLI default client Region: eu-central-1
+# CLI default output format: json
+# CLI profile name: default
+```
+
+On later days, just refresh the token:
+
+```bash
+aws sso login
+aws sts get-caller-identity   # verify
+```
+
+Bootstrap the target account/region once (uses the default profile):
+
+```bash
+cdk bootstrap aws://<ACCOUNT>/eu-central-1
+```
+
 ## Deploy
 
 ```bash
-# Option 1: via AWS_PROFILE (recommended)
-AWS_PROFILE=myprofile cdk deploy
+# Uses default profile from aws sso login above
+cdk deploy
 
-# Option 2: explicit context
-cdk deploy -c account=123456789012 -c region=eu-north-1
+# Optional: override account/region via context
+cdk deploy -c account=123456789012 -c region=eu-central-1
 
 # Optional flags
 cdk deploy -c domainPrefix=cloud-kaffe-alice        # override Cognito Hosted UI prefix
@@ -35,6 +63,8 @@ cdk deploy -c archiveRetentionDays=7                # override EventBridge archi
 cdk deploy -c demoPassword=MyDemoPass123            # override demoUser password (default Kaffe123!)
 cdk deploy -c alertEmail=you@example.com            # subscribe email to SNS alerts topic
 ```
+
+If your token expires mid-day: `aws sso login` and rerun.
 
 Expected deploy time: **12–15 min cold** (Cognito User Pool + domain + API Gateway stage dominate).
 
