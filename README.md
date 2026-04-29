@@ -276,3 +276,59 @@ These are flagged in the design doc. Not shipped here, good candidates for follo
 
 - **Split-brain write path:** OrderReceiver writes DDB then publishes EventBridge. If the PutEvents fails, order is stored but never processed. Known; not fixed in this scaffold. Production fix = DDB Streams → Pipes (see next steps above).
 - **DDB Streams, TTL, OAuth scope** are spec'd but not wired to a consumer. Instructor discretion on whether to showcase during Module 5 or leave as "these are here when you need them."
+
+## Demo notes
+
+### Authenticating as `demoUser` and getting a token
+
+Two ways to obtain a JWT for `POST /orders`.
+
+#### 1. Hosted UI (browser, implicit grant) — what the workshop uses
+
+After deploy, the `HostedUiUrl` stack output (`cloud-kaffe-stack.ts:87`) gives you a URL like:
+
+```
+https://cloud-kaffe-<account>-<developer>.auth.eu-north-1.amazoncognito.com/login?client_id=<CLIENT_ID>&response_type=token&redirect_uri=https://example.com
+```
+
+Steps:
+
+1. Open URL in browser.
+2. Sign in: `demoUser` / `Kaffe123!` (or whatever `demoPassword` you deployed with).
+3. Cognito redirects to `https://example.com#id_token=<JWT>&access_token=...&expires_in=3600&token_type=Bearer`.
+4. Copy `id_token` from the URL fragment.
+5. Use it:
+
+```bash
+curl -X POST https://<api-id>.execute-api.eu-north-1.amazonaws.com/prod/orders \
+  -H "Authorization: Bearer <id_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"item":"latte"}'
+```
+
+Token valid 1h. The `example.com` page won't load — that's expected; the token is in the URL bar, that's the point.
+
+#### 2. CLI via AWS SDK (`AdminInitiateAuth`)
+
+The App Client has the `adminUserPassword` flow enabled (`auth.ts:92`), same as the bot uses. Needs AWS credentials with `cognito-idp:AdminInitiateAuth` on the pool.
+
+```bash
+USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 50 \
+  --query "UserPools[?Name=='CloudKaffeUsers-<developer>'].Id" --output text)
+
+CLIENT_ID=$(aws cognito-idp list-user-pool-clients --user-pool-id "$USER_POOL_ID" \
+  --query "UserPoolClients[0].ClientId" --output text)
+
+aws cognito-idp admin-initiate-auth \
+  --user-pool-id "$USER_POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --auth-flow ADMIN_USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME=demoUser,PASSWORD=Kaffe123! \
+  --query 'AuthenticationResult.IdToken' --output text
+```
+
+Pipe to `TOKEN=$(...)` then `curl -H "Authorization: Bearer $TOKEN" ...`.
+
+#### Which token?
+
+API Gateway's `CognitoUserPoolsAuthorizer` accepts either `IdToken` or `AccessToken`. `IdToken` is simplest — no scope check on the method (`api-and-compute.ts:239` uses plain `COGNITO`, no `authorizationScopes`), so the `orders/write` scope isn't required.
