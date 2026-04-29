@@ -4,6 +4,12 @@ AWS CDK v2 TypeScript project for a full-day AWS masterclass workshop. Serverles
 
 See `docs/workshop-agenda.md` for the workshop agenda (Danish), `docs/infrastructure.md` for the original resource spec, and the canonical design doc in `~/.gstack/projects/rasmusd-cloud2-velliv-cloud-coffee/rasmu-main-design-20260424-100858.md`.
 
+## Architecture
+
+![Cloud Kaffen architecture](docs/architecture-preview.png)
+
+Solid black = request path · dashed red = failure / alarm path · dashed grey = telemetry.
+
 ## Prereqs
 
 - Node 20+
@@ -50,36 +56,113 @@ cdk bootstrap aws://<ACCOUNT>/eu-central-1
 
 ## Deploy
 
+This stack is multi-tenant within a single AWS account. Every team member
+deploys their **own isolated stack** by passing a `developer` namespace —
+no resource-name collisions, no shared state.
+
+### 1. Pick a developer namespace
+
+The `developer` context value becomes a suffix on every named AWS resource
+(Cognito user pool + Hosted UI domain, EventBus, SQS, alarms, dashboard, API,
+EMF metric namespace, secret, layer, ...). The stack name itself becomes
+`CloudKaffeStack-<developer>`.
+
+Rules: lowercased, non-alphanumerics stripped, 2–16 chars. Use your handle
+or first name — `alice`, `bob`, `rasmus`.
+
+The CLI looks up `developer` in this order, first hit wins:
+
+1. `-c developer=<name>` flag
+2. `$DEVELOPER` env var
+3. `$USER` / `$USERNAME` env var (your OS login)
+
+So on a personal machine `cdk deploy` "just works"; on shared CI/laptops
+pass `-c developer=...` explicitly.
+
+### 2. First deploy
+
 ```bash
-# Uses default profile from aws sso login above
-cdk deploy
+# Make sure SSO is fresh
+aws sso login
 
-# Optional: override account/region via context
-cdk deploy -c account=123456789012 -c region=eu-central-1
-
-# Optional flags
-cdk deploy -c domainPrefix=cloud-kaffe-alice        # override Cognito Hosted UI prefix
-cdk deploy -c archiveRetentionDays=7                # override EventBridge archive retention (default 3)
-cdk deploy -c demoPassword=MyDemoPass123            # override demoUser password (default Kaffe123!)
-cdk deploy -c alertEmail=you@example.com            # subscribe email to SNS alerts topic
+# Deploy. Stack becomes CloudKaffeStack-alice.
+cdk deploy -c developer=alice
 ```
 
-If your token expires mid-day: `aws sso login` and rerun.
+Expected time: **12–15 min cold** (Cognito user pool + domain + API Gateway
+stage dominate). Subsequent `cdk deploy` runs are seconds when nothing
+changed.
 
-Expected deploy time: **12–15 min cold** (Cognito User Pool + domain + API Gateway stage dominate).
+### 3. Optional flags
+
+All passed via `-c key=value`. Combine freely.
+
+| Flag                  | Default       | Purpose                                                |
+|-----------------------|---------------|--------------------------------------------------------|
+| `developer`           | `$USER`       | Per-developer namespace (see §1)                       |
+| `account`             | from CLI/SSO  | Override AWS account                                   |
+| `region`              | `eu-north-1`  | Override AWS region                                    |
+| `enableSimulator`     | `false`       | Turn the per-minute traffic generator ON (see below)   |
+| `archiveRetentionDays`| `3`           | EventBridge archive retention                          |
+| `demoPassword`        | `Kaffe123!`   | demoUser password (Module 4 Hosted UI login)           |
+| `alertEmail`          | _(none)_      | Subscribe email to the SNS alerts topic                |
+| `domainPrefix`        | auto         | Override Cognito Hosted UI prefix                       |
+
+```bash
+cdk deploy -c developer=alice -c enableSimulator=true -c alertEmail=you@example.com
+```
+
+### 4. Enable the traffic simulator
+
+The EventBridge schedule that fires `TrafficSimulator` every minute is
+**disabled on a fresh deploy** — the stack idles for ~$0/day until you opt in.
+There are two ways to enable it:
+
+**A. At deploy time (declarative — survives subsequent deploys as long as
+the flag stays set):**
+
+```bash
+cdk deploy -c developer=alice -c enableSimulator=true
+```
+
+**B. On an already-deployed stack (imperative — fast, no CDK round-trip):**
+
+```bash
+# Turn on for a workshop session
+aws events enable-rule  --region eu-central-1 \
+  --name "CloudKaffeStack-alice-TrafficSimulatorSchedule"
+
+# Turn off again
+aws events disable-rule --region eu-central-1 \
+  --name "CloudKaffeStack-alice-TrafficSimulatorSchedule"
+```
+
+⚠️ The next `cdk deploy` without `-c enableSimulator=true` will revert the
+rule to **disabled**. During a workshop, either keep `enableSimulator=true`
+in your deploy command or avoid redeploying mid-session.
+
+### 5. List / verify your stacks
+
+```bash
+aws cloudformation list-stacks \
+  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+  --query "StackSummaries[?starts_with(StackName, 'CloudKaffeStack-')].StackName"
+```
+
+If the SSO token expires mid-day: `aws sso login` and rerun.
 
 ## What gets deployed
 
 - Cognito User Pool with Hosted UI, bot user (for simulator) + demoUser (for workshop attendees)
-- DynamoDB `CloudKaffeOrders` table (PAY_PER_REQUEST, GSI on `coffeeType`, Streams NEW_IMAGE, TTL `expiresAt`)
-- S3 `OrderReceiptsBucket` (block public, auto-delete on destroy)
-- EventBridge `CloudKaffeBus` + 3-day archive + OrderCreated rule
-- SQS `OrderProcessorQueue` + DLQ + depth alarm
-- SNS `OrderAlertsTopic`
+- DynamoDB orders table (PAY_PER_REQUEST, GSI on `coffeeType`, Streams NEW_IMAGE, TTL `expiresAt`) — auto-named per developer stack
+- S3 OrderReceipts bucket (block public, auto-delete on destroy)
+- EventBridge `CloudKaffeBus-<dev>` + 3-day archive + OrderCreated rule
+- SQS OrderProcessor queue + DLQ + depth alarm — auto-named per developer stack
+- SNS `CloudKaffeOrderAlerts-<dev>` topic
 - 3 Lambdas: OrderReceiver, OrderProcessor, TrafficSimulator
 - API Gateway REST API v1 with Cognito authorizer + schema validator + X-Ray
 - CloudWatch composite alarm (5XX rate > 5% AND request count >= 10)
-- EventBridge rule scheduling TrafficSimulator every 1 minute
+- EventBridge rule scheduling TrafficSimulator every 1 minute (**disabled by default** — see Deploy §4)
 
 ## Workshop module pointers
 
@@ -94,19 +177,19 @@ Cross-referenced with `docs/workshop-agenda.md`.
   | filter @message like /ERROR/
   | sort @timestamp desc
   ```
-- Composite alarm `CloudKaffe-API-ErrorSpike`: fires when FATAL_ERROR chaos drives 5XX rate > 5% AND request count >= 10 in 1 min
-- DLQ depth alarm `CloudKaffe-DLQ-NotEmpty`: fires when POISON_PILL chaos fills DLQ
+- Composite alarm `CloudKaffe-API-ErrorSpike-<dev>`: fires when FATAL_ERROR chaos drives 5XX rate > 5% AND request count >= 10 in 1 min
+- DLQ depth alarm `CloudKaffe-DLQ-NotEmpty-<dev>`: fires when POISON_PILL chaos fills DLQ
 
 ### Module 2 — Compute & API
 
 - Lambda init vs invoke duration visible in each Lambda's log group
-- API Gateway console → `CloudKaffeOrdersApi` → Stages → `v1`
+- API Gateway console → `CloudKaffeOrdersApi-<dev>` → Stages → `v1`
 
 ### Module 3 — IaC (CDK & CFN)
 
 - `npx cdk synth` prints the full CloudFormation template
 - `npx cdk diff` (after deploy) shows empty — idempotent
-- CloudFormation console → `CloudKaffeStack` → Events / Resources tabs
+- CloudFormation console → `CloudKaffeStack-<dev>` → Events / Resources tabs
 
 ### Module 4 — Auth (Cognito)
 
@@ -133,16 +216,16 @@ Cross-referenced with `docs/workshop-agenda.md`.
 
 ### Module 5 — Data & Events
 
-- DynamoDB console → `CloudKaffeOrders` → Items. Demo Query (cheap) vs Scan (expensive).
-- SQS console → `CloudKaffeOrderProcessor` → Visibility Timeout, DLQ redrive
-- EventBridge console → Buses → `CloudKaffeBus` → Rules → `OrderCreatedToProcessor`
-- Event Archive → `CloudKaffeArchive` → Replay. Receipt keys are **deterministic** (`receipts/${orderId}.json`) so replay reprocesses in place — no duplicate files.
+- DynamoDB console → look for the OrdersTable owned by `CloudKaffeStack-<dev>` → Items. Demo Query (cheap) vs Scan (expensive).
+- SQS console → OrderProcessor queue owned by `CloudKaffeStack-<dev>` → Visibility Timeout, DLQ redrive
+- EventBridge console → Buses → `CloudKaffeBus-<dev>` → Rules → `OrderCreatedToProcessor-<dev>`
+- Event Archive → `CloudKaffeArchive-<dev>` → Replay. Receipt keys are **deterministic** (`receipts/${orderId}.json`) so replay reprocesses in place — no duplicate files.
 - OrderProcessor logs show `presignedUrl` per order — click the URL in CloudWatch Logs to open the receipt JSON in the browser (valid 1 hour).
 
 ## Destroy
 
 ```bash
-cdk destroy
+cdk destroy -c developer=alice
 ```
 
 Expected 5–8 min. Archive deletion is the slow step. Cleaner than before thanks to:
@@ -151,28 +234,33 @@ Expected 5–8 min. Archive deletion is the slow step. Cleaner than before thank
 - S3 bucket `autoDeleteObjects: true`
 - Cognito user pool + cascade-deleted bot/demo users via L1 `CfnUserPoolUser`
 
-Verify zero orphans:
+Verify zero orphans (substitute your developer namespace):
 
 ```bash
-aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/CloudKaffeStack"
+DEV=alice
+aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/CloudKaffeStack-$DEV"
 aws s3 ls | grep -i kaffe
-aws cloudwatch describe-alarms --alarm-name-prefix "CloudKaffe"
-aws events describe-archive --archive-name CloudKaffeArchive
-aws cognito-idp list-user-pools --max-results 20 | grep -i kaffe
+aws cloudwatch describe-alarms --alarm-name-prefix "CloudKaffe" | grep -i "$DEV"
+aws events describe-archive --archive-name "CloudKaffeArchive-$DEV"
+aws cognito-idp list-user-pools --max-results 20 | grep -i "kaffe.*$DEV"
 ```
 
 ## Cost warning
 
-⚠️ **Traffic simulator runs every minute forever until `cdk destroy`.**
+The traffic simulator is **disabled by default** (see Deploy §4) so an idle
+stack costs ≈$0/day. Once you turn it on (`enableSimulator=true` or
+`aws events enable-rule`), it fires every minute until disabled or destroyed.
 
-Rough napkin math (1 attendee, 1 day):
+Rough napkin math while the simulator is **enabled** (1 attendee, 1 day):
 - API Gateway: ~100 req/min × 60 × 8 hrs = ~48k req → ~$0.17
 - DynamoDB PAY_PER_REQUEST: ~34k writes → ~$0.04
 - CloudWatch Logs: ~100 MB → ~$0.05
 - EventBridge archive storage (3 days): negligible
 - **Total: <$1/day**
 
-Leaving it running overnight = a few dollars. Forever = much more. Destroy at end of day.
+Habit at end of session: either disable the rule
+(`aws events disable-rule ...`) or `cdk destroy`. Forgetting both = a few
+dollars overnight, more if left for days.
 
 ## Next steps / out of scope
 

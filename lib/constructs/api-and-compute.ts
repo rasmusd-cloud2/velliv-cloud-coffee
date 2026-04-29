@@ -15,6 +15,11 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 
 export interface ApiAndComputeConstructProps {
+  /**
+   * Per-developer namespace suffix. Used for human-visible names (API,
+   * layer, alarms) so multiple team members can deploy into one account.
+   */
+  readonly developer: string;
   readonly userPool: cognito.UserPool;
   readonly ordersTable: dynamodb.Table;
   readonly eventBus: events.EventBus;
@@ -52,7 +57,7 @@ export class ApiAndComputeConstruct extends Construct {
 
     // Shared ESM layer - stays as .mjs at /opt/nodejs/node_modules/shared-utils
     this.sharedLayer = new lambda.LayerVersion(this, 'SharedUtilsLayer', {
-      layerVersionName: 'CloudKaffeSharedUtils',
+      layerVersionName: `CloudKaffeSharedUtils-${props.developer}`,
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', '..', 'src', 'shared-layer'),
       ),
@@ -104,7 +109,7 @@ export class ApiAndComputeConstruct extends Construct {
         environment: {
           ORDERS_TABLE: props.ordersTable.tableName,
           EVENT_BUS_NAME: props.eventBus.eventBusName,
-          POWERTOOLS_METRICS_NAMESPACE: 'CloudKaffe',
+          POWERTOOLS_METRICS_NAMESPACE: `CloudKaffe-${props.developer}`,
           NODE_OPTIONS: '--enable-source-maps',
         },
         bundling: commonBundling,
@@ -179,8 +184,8 @@ export class ApiAndComputeConstruct extends Construct {
 
     // REST API with Cognito authorizer + request validator
     this.api = new apigw.RestApi(this, 'OrdersApi', {
-      restApiName: 'CloudKaffeOrdersApi',
-      description: 'Cloud Kaffen order intake API',
+      restApiName: `CloudKaffeOrdersApi-${props.developer}`,
+      description: `Cloud Kaffen order intake API (${props.developer})`,
       deployOptions: {
         stageName: 'v1',
         tracingEnabled: true,
@@ -201,7 +206,7 @@ export class ApiAndComputeConstruct extends Construct {
       'CognitoAuthorizer',
       {
         cognitoUserPools: [props.userPool],
-        authorizerName: 'CloudKaffeCognitoAuth',
+        authorizerName: `CloudKaffeCognitoAuth-${props.developer}`,
       },
     );
 
@@ -259,7 +264,7 @@ export class ApiAndComputeConstruct extends Construct {
       label: 'API 5XX Error Rate (%)',
     });
     const highErrorRate = new cloudwatch.Alarm(this, 'HighErrorRateAlarm', {
-      alarmName: 'CloudKaffe-API-HighErrorRate',
+      alarmName: `CloudKaffe-API-HighErrorRate-${props.developer}`,
       metric: errorRate,
       threshold: 5,
       evaluationPeriods: 1,
@@ -267,7 +272,7 @@ export class ApiAndComputeConstruct extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     const enoughTraffic = new cloudwatch.Alarm(this, 'EnoughTrafficAlarm', {
-      alarmName: 'CloudKaffe-API-EnoughTraffic',
+      alarmName: `CloudKaffe-API-EnoughTraffic-${props.developer}`,
       metric: mCount,
       threshold: 10,
       evaluationPeriods: 1,
@@ -276,7 +281,7 @@ export class ApiAndComputeConstruct extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     this.errorSpikeAlarm = new cloudwatch.CompositeAlarm(this, 'ApiErrorSpikeComposite', {
-      compositeAlarmName: 'CloudKaffe-API-ErrorSpike',
+      compositeAlarmName: `CloudKaffe-API-ErrorSpike-${props.developer}`,
       alarmDescription:
         'Fires when API GW 5XX rate > 5% AND request count >= 10 in 1 min',
       alarmRule: cloudwatch.AlarmRule.allOf(

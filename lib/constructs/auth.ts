@@ -10,8 +10,13 @@ import {
 
 export interface AuthConstructProps {
   /**
-   * Hosted UI domain prefix. If omitted, derived from account ID to avoid
-   * global Cognito namespace collisions between attendees.
+   * Per-developer namespace suffix (e.g. "alice"). Used to disambiguate
+   * resources that share an account-wide / global namespace.
+   */
+  readonly developer: string;
+  /**
+   * Hosted UI domain prefix. If omitted, derived from account ID + developer
+   * to avoid global Cognito namespace collisions.
    */
   readonly domainPrefix?: string;
   /**
@@ -35,7 +40,7 @@ export class AuthConstruct extends Construct {
     // User pool
     // -----------------------------------------------------------------
     this.userPool = new cognito.UserPool(this, 'UserPool', {
-      userPoolName: 'CloudKaffeUsers',
+      userPoolName: `CloudKaffeUsers-${props.developer}`,
       signInAliases: { email: true, username: true },
       selfSignUpEnabled: false, // bot + demoUser only; no attendee sign-ups
       standardAttributes: {
@@ -71,7 +76,8 @@ export class AuthConstruct extends Construct {
     // Hosted UI domain (account-derived prefix avoids global collision)
     // -----------------------------------------------------------------
     this.domainPrefix =
-      props.domainPrefix ?? `cloud-kaffe-${cdk.Stack.of(this).account}`;
+      props.domainPrefix ??
+      `cloud-kaffe-${cdk.Stack.of(this).account}-${props.developer}`;
     this.userPool.addDomain('HostedUI', {
       cognitoDomain: { domainPrefix: this.domainPrefix },
     });
@@ -104,7 +110,7 @@ export class AuthConstruct extends Construct {
     // Bot password - plaintext dummy in SecretsManager (demo only)
     // -----------------------------------------------------------------
     this.botPasswordSecret = new secretsmanager.Secret(this, 'BotPassword', {
-      secretName: 'CloudKaffe/BotUserPassword',
+      secretName: `CloudKaffe/${props.developer}/BotUserPassword`,
       description:
         'Cloud Kaffen bot user password (workshop demo only, rotated per deploy)',
       generateSecretString: {

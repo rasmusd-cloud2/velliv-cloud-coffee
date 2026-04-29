@@ -11,6 +11,11 @@ import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 
 export interface DatabaseAndEventsConstructProps {
+  /**
+   * Per-developer namespace suffix. Used to disambiguate human-readable
+   * resource names (alarms, archive) within a shared account.
+   */
+  readonly developer: string;
   readonly archiveRetentionDays: number;
   readonly alertEmail?: string;
 }
@@ -42,8 +47,10 @@ export class DatabaseAndEventsConstruct extends Construct {
     super(scope, id);
 
     // ---- DynamoDB ----
+    // Physical name omitted: per-developer stacks need unique table names and
+    // consumers reference `props.ordersTable.tableName` (CDK token) rather
+    // than a hardcoded string, so auto-naming is collision-free.
     this.ordersTable = new dynamodb.Table(this, 'OrdersTable', {
-      tableName: 'CloudKaffeOrders',
       partitionKey: { name: 'orderId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       stream: dynamodb.StreamViewType.NEW_IMAGE,
@@ -66,23 +73,25 @@ export class DatabaseAndEventsConstruct extends Construct {
     });
 
     // ---- EventBridge custom bus + archive ----
+    // Bus + archive names must be unique per region/account. Suffixing with
+    // developer keeps multiple team-member stacks isolated.
     this.eventBus = new events.EventBus(this, 'CloudKaffeBus', {
-      eventBusName: 'CloudKaffeBus',
+      eventBusName: `CloudKaffeBus-${props.developer}`,
     });
     this.eventBus.archive('CloudKaffeArchive', {
-      archiveName: 'CloudKaffeArchive',
+      archiveName: `CloudKaffeArchive-${props.developer}`,
       retention: cdk.Duration.days(props.archiveRetentionDays),
       eventPattern: { account: [cdk.Stack.of(this).account] },
     });
 
     // ---- SQS queue + DLQ ----
+    // Queue names omitted: consumers reference `queueUrl` token. Auto-naming
+    // avoids per-region collision between developer stacks.
     this.orderDlq = new sqs.Queue(this, 'OrderProcessorDLQ', {
-      queueName: 'CloudKaffeOrderProcessor-DLQ',
       retentionPeriod: cdk.Duration.days(14),
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
     this.orderQueue = new sqs.Queue(this, 'OrderProcessorQueue', {
-      queueName: 'CloudKaffeOrderProcessor',
       visibilityTimeout: cdk.Duration.seconds(30),
       deadLetterQueue: { queue: this.orderDlq, maxReceiveCount: 3 },
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -91,15 +100,15 @@ export class DatabaseAndEventsConstruct extends Construct {
     // ---- EventBridge rule: OrderCreated -> SQS ----
     this.orderCreatedRule = new events.Rule(this, 'OrderCreatedRule', {
       eventBus: this.eventBus,
-      ruleName: 'OrderCreatedToProcessor',
+      ruleName: `OrderCreatedToProcessor-${props.developer}`,
       eventPattern: { detailType: ['OrderCreated'] },
       targets: [new targets.SqsQueue(this.orderQueue)],
     });
 
     // ---- SNS alerts topic ----
     this.alertsTopic = new sns.Topic(this, 'OrderAlertsTopic', {
-      topicName: 'CloudKaffeOrderAlerts',
-      displayName: 'Cloud Kaffen Alerts',
+      topicName: `CloudKaffeOrderAlerts-${props.developer}`,
+      displayName: `Cloud Kaffen Alerts (${props.developer})`,
     });
     if (props.alertEmail) {
       this.alertsTopic.addSubscription(
@@ -109,7 +118,7 @@ export class DatabaseAndEventsConstruct extends Construct {
 
     // ---- DLQ depth alarm ----
     this.dlqAlarm = new cloudwatch.Alarm(this, 'DLQDepthAlarm', {
-      alarmName: 'CloudKaffe-DLQ-NotEmpty',
+      alarmName: `CloudKaffe-DLQ-NotEmpty-${props.developer}`,
       alarmDescription:
         'DLQ has >=1 message - order processor failed 3 retries (POISON_PILL chaos or real failure)',
       metric: this.orderDlq.metricApproximateNumberOfMessagesVisible({

@@ -9,6 +9,11 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as logs from 'aws-cdk-lib/aws-logs';
 
 export interface DashboardConstructProps {
+  /**
+   * Per-developer namespace suffix. Used for dashboard name + EMF metric
+   * search so multiple team-member stacks render isolated dashboards.
+   */
+  readonly developer: string;
   readonly api: apigw.RestApi;
   readonly orderReceiver: lambda.IFunction;
   readonly orderProcessor: lambda.IFunction;
@@ -38,7 +43,7 @@ export class DashboardConstruct extends Construct {
     const period = cdk.Duration.minutes(1);
 
     this.dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {
-      dashboardName: 'CloudKaffe-Workshop',
+      dashboardName: `CloudKaffe-Workshop-${props.developer}`,
       defaultInterval: cdk.Duration.hours(1),
       periodOverride: cloudwatch.PeriodOverride.AUTO,
     });
@@ -46,10 +51,10 @@ export class DashboardConstruct extends Construct {
     // ---- Header ----
     const header = new cloudwatch.TextWidget({
       markdown: [
-        '# Cloud Kaffen — Live Activity',
+        `# Cloud Kaffen — Live Activity (developer: \`${props.developer}\`)`,
         'Traffic simulator fires every minute. Chaos types injected: `FATAL_ERROR` (5XX), `SLOW_BREW` (latency), `POISON_PILL` (DLQ), `schemaInvalid` (4XX at API GW validator).',
         '',
-        `Region: **${stack.region}** · Account: **${stack.account}**`,
+        `Region: **${stack.region}** · Account: **${stack.account}** · Stack: **${stack.stackName}**`,
       ].join('\n'),
       width: 24,
       height: 3,
@@ -76,13 +81,16 @@ export class DashboardConstruct extends Construct {
     });
 
     // ---- Coffee sold by type (EMF, unknown dimension values → SEARCH) ----
+    // Namespace is per-developer so each stack's dashboard shows only its
+    // own coffee sales — keeps workshop attendees from cross-pollinating.
+    const emfNamespace = `CloudKaffe-${props.developer}`;
     const coffeeByType = new cloudwatch.GraphWidget({
-      title: 'Coffees sold by type (EMF CloudKaffe/CoffeeSold)',
+      title: `Coffees sold by type (EMF ${emfNamespace}/CoffeeSold)`,
       width: 12,
       height: 6,
       left: [
         new cloudwatch.MathExpression({
-          expression: `SEARCH('{CloudKaffe,CoffeeType} MetricName="CoffeeSold"', 'Sum', 60)`,
+          expression: `SEARCH('{${emfNamespace},CoffeeType} MetricName="CoffeeSold"', 'Sum', 60)`,
           label: '',
           period,
         }),

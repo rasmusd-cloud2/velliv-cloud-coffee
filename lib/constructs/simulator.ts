@@ -16,6 +16,12 @@ export interface SimulatorConstructProps {
   readonly botUsername: string;
   readonly botPasswordSecret: secretsmanager.Secret;
   readonly apiEndpoint: string;
+  /**
+   * Whether the EventBridge schedule that fires the simulator every minute
+   * is enabled. Default false — keeps the stack idle (and cheap) until the
+   * workshop instructor opts in via `-c enableSimulator=true`.
+   */
+  readonly scheduleEnabled?: boolean;
 }
 
 export class SimulatorConstruct extends Construct {
@@ -77,9 +83,12 @@ export class SimulatorConstruct extends Construct {
     );
 
     new events.Rule(this, 'SimulatorSchedule', {
-      ruleName: 'CloudKaffeTrafficSimulatorSchedule',
+      // Default-bus EventBridge rule names must be unique per region/account.
+      // Suffix with stack name (already includes developer namespace).
+      ruleName: `${stackName}-TrafficSimulatorSchedule`,
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new eventsTargets.LambdaFunction(this.simulator)],
+      enabled: props.scheduleEnabled ?? false,
     });
   }
 }

@@ -25,6 +25,8 @@ const eb = new EventBridgeClient({});
 
 const ORDERS_TABLE = process.env.ORDERS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+const METRICS_NAMESPACE =
+  process.env.POWERTOOLS_METRICS_NAMESPACE ?? 'CloudKaffe';
 
 interface OrderBody {
   coffeeType: string;
@@ -90,7 +92,7 @@ export const handler = async (
         Timestamp: Date.now(),
         CloudWatchMetrics: [
           {
-            Namespace: 'CloudKaffe',
+            Namespace: METRICS_NAMESPACE,
             Dimensions: [['CoffeeType']],
             Metrics: [{ Name: 'CoffeeSold', Unit: 'Count' }],
           },

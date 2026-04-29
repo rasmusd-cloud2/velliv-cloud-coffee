@@ -1,3 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>render</title>
+<style>html,body{margin:0;padding:0;background:#fff}#host{padding:0}</style>
+</head><body>
+<div id="host"></div>
+<script id="xml-data" type="text/plain">
 <mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" version="29.3.0">
   <diagram id="cloud-kaffe-arch" name="CloudKaffeStack">
     <mxGraphModel dx="1793" dy="634" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1720" pageHeight="1100" math="0" shadow="0">
@@ -278,3 +284,17 @@
     </mxGraphModel>
   </diagram>
 </mxfile>
+</script>
+<script src="https://viewer.diagrams.net/js/viewer-static.min.js"></script>
+<script>
+window.addEventListener('load', () => {
+  const xml = document.getElementById('xml-data').textContent.trim();
+  const div = document.createElement('div');
+  div.className = 'mxgraph';
+  div.setAttribute('data-mxgraph', JSON.stringify({xml, nav: false, resize: false, toolbar: ''}));
+  document.getElementById('host').appendChild(div);
+  if (window.GraphViewer) GraphViewer.processElements();
+  setTimeout(()=>{document.title='rendered'}, 1500);
+});
+</script>
+</body></html>

@@ -7,18 +7,31 @@ import { SimulatorConstruct } from './constructs/simulator';
 import { DashboardConstruct } from './constructs/dashboard';
 
 export interface CloudKaffeStackProps extends cdk.StackProps {
+  /**
+   * Per-developer namespace suffix. Required so multiple team members can
+   * deploy into the same AWS account without resource-name collisions.
+   */
+  readonly developer: string;
   readonly domainPrefix?: string;
   readonly archiveRetentionDays: number;
   readonly demoPassword: string;
   readonly alertEmail?: string;
+  /**
+   * Enable the per-minute traffic-simulator schedule. Default false so a
+   * fresh deploy is idle (and cheap) until the instructor opts in.
+   */
+  readonly enableSimulator?: boolean;
 }
 
 export class CloudKaffeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: CloudKaffeStackProps) {
     super(scope, id, props);
 
+    const { developer } = props;
+
     // Construct wiring order: Auth -> DataAndEvents -> ApiAndCompute -> Simulator
     const auth = new AuthConstruct(this, 'Auth', {
+      developer,
       domainPrefix: props.domainPrefix,
       demoPassword: props.demoPassword,
     });
@@ -27,12 +40,14 @@ export class CloudKaffeStack extends cdk.Stack {
       this,
       'DataAndEvents',
       {
+        developer,
         archiveRetentionDays: props.archiveRetentionDays,
         alertEmail: props.alertEmail,
       },
     );
 
     const apiAndCompute = new ApiAndComputeConstruct(this, 'ApiAndCompute', {
+      developer,
       userPool: auth.userPool,
       ordersTable: dataAndEvents.ordersTable,
       eventBus: dataAndEvents.eventBus,
@@ -46,9 +61,11 @@ export class CloudKaffeStack extends cdk.Stack {
       botUsername: auth.botUsername,
       botPasswordSecret: auth.botPasswordSecret,
       apiEndpoint: apiAndCompute.apiEndpoint,
+      scheduleEnabled: props.enableSimulator ?? false,
     });
 
     const dashboard = new DashboardConstruct(this, 'Dashboard', {
+      developer,
       api: apiAndCompute.api,
       orderReceiver: apiAndCompute.orderReceiver,
       orderProcessor: apiAndCompute.orderProcessor,
@@ -78,6 +95,10 @@ export class CloudKaffeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DashboardUrl', {
       value: dashboard.dashboardUrl,
       description: 'CloudWatch workshop dashboard',
+    });
+    new cdk.CfnOutput(this, 'Developer', {
+      value: developer,
+      description: 'Developer namespace this stack was deployed under',
     });
   }
 }

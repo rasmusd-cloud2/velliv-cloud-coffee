@@ -30,3 +30,4 @@ npm-debug.log*
 !src/shared-layer/nodejs/node_modules/
 !src/shared-layer/nodejs/node_modules/shared-utils/
 !src/shared-layer/nodejs/node_modules/shared-utils/*
+.gstack/
